@@ -1,0 +1,29 @@
+@import "tailwindcss";
+
+:root {
+  --color-dark: #000000;
+  --color-primary-start: #00f0ff;
+  --color-primary-mid: #0070f3;
+  --color-primary-end: #032b82;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  background-color: var(--color-dark);
+  color: white;
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Base custom utilities for strict aesthetic mapping */
+.text-gradient-primary {
+  background: linear-gradient(to right, white, var(--color-primary-start), var(--color-primary-mid));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.bg-gradient-primary {
+  background: linear-gradient(135deg, var(--color-primary-start), var(--color-primary-mid), var(--color-primary-end));
+}

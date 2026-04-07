@@ -1,0 +1,9 @@
+flask>=3.0.0
+ultralytics>=8.1.0
+pyyaml>=6.0.1
+shapely>=2.0.3
+flask-socketio>=5.4.1
+pandas>=2.2.0
+eventlet>=0.35.1
+onnx>=1.15.0
+onnxruntime>=1.17.0

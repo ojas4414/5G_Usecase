@@ -1,0 +1,1 @@
+﻿tsconfig.json(20,18): error TS6310: Referenced project 'C:/Users/Ojas/Desktop/5g-usecase/frontend/tsconfig.node.json' may not disable emit.

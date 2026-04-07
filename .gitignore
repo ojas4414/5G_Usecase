@@ -1,0 +1,19 @@
+# Environments
+venv/
+env/
+.env
+
+# Python byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# JS/Node
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# System Files
+.DS_Store
+Thumbs.db

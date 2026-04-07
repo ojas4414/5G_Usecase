@@ -1,0 +1,24 @@
+node_id: "EDGE-NYC-5G-01"
+
+# The ROI (Region Of Interest) represents the "Queue Area" in physical space.
+# It is defined as a list of [x, y] coordinates forming a polygon on the 2D video feed.
+# For example, bounding a specific walkway or checkout lane.
+roi_polygon:
+  - [200, 200]
+  - [800, 200]
+  - [800, 600]
+  - [200, 600]
+
+# Time (in seconds) a tracked person must stay inside the ROI to be considered "waiting in queue"
+queue_wait_threshold_sec: 5.0
+
+# Maximum time (in seconds) a person can be "lost" by the YOLO tracker before their queue wait time is reset.
+track_grace_period_sec: 2.0
+
+# Physical area of the ROI (in square meters) used to calculate crowd density.
+roi_area_sqm: 10.0
+
+# To connect your actual 5G IP Camera, replace 0 with the RTSP network stream URL:
+# Example: video_source: "rtsp://admin:password@10.0.0.51:554/stream1"
+# For local fallback testing, you can keep it as 0
+video_source: 0
