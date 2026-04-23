@@ -13,6 +13,14 @@ node_modules/
 dist/
 dist-ssr/
 *.local
+*.log
+*.err.log
+*.tsbuildinfo
+*.timestamp-*.mjs
+build_err.txt
+ts_errors.txt
+ts_errors_utf8.txt
+vite_build.txt
 
 # System Files
 .DS_Store

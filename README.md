@@ -31,30 +31,58 @@ The result is a system that watches queues and predicts exactly how long the wai
 
 ---
 
-## 🚀 The Technical Vision
+## 🧠 System Architecture & Design Choices (Why we used what we used)
 
-Traditional camera analytics suffer from heavy bandwidth constraints, cloud computing latency, and fragmented clumsy dashboards. 
+Traditional camera analytics suffer from heavy bandwidth constraints, cloud computing latency, and fragmented clumsy dashboards. This project solves this by moving processing directly to the **5G Edge** and utilizing modern decentralized data flows.
 
-This project solves this by moving **YOLOv8 Computer Vision directly to the 5G Edge**. It strips away heavy chunked image transmission, instead sending pure, serialized geometric metadata over ultra-fast WebSockets. The result? A **cinematic, GPU-accelerated client-side dashboard** that monitors spatial ROI (Region of Interest) queue wait times with absolute zero perceived lag.
+### 1. The AI Model: YOLOv8 + BoT-SORT Tracking
+*   **Why YOLOv8?** YOLOv8 (specifically the Nano/`yolov8n.onnx` variant) was chosen because it provides the best balance between mean Average Precision (mAP) and inference speed on Edge devices. It allows us to process frames in real-time natively on CUDA-enabled GPUs or even modern CPUs.
+*   **Why BoT-SORT/ByteTrack?** Object detection alone just gives us bounding boxes. To calculate "Wait Time", we need to track *unique individuals* over time. By enabling tracking (`persist=True`), the model assigns temporal IDs. If Person #4 enters a queue zone and leaves 30 seconds later, the tracker allows our math engine to record a 30-second service time.
+
+### 2. Why 5G Networks & 5G Cameras?
+*   **The Logic:** The system is designed around wireless 5G IP cameras communicating directly with a local 5G MEC (Multi-access Edge Computing) node.
+*   **Why?** In massive environments like airports, stadiums, or outdoor festivals, running physical fiber/Ethernet cables to hundreds of cameras is cost-prohibitive or impossible. Traditional Wi-Fi completely fails under high-density crowd interference. 5G provides **eMBB** (high uplink bandwidth) and **URLLC** (ultra-reliable low latency) ensuring frames reach the processor in milliseconds. Most importantly, 5G MEC routes the data to a local edge server *at the cell tower site*, completely avoiding the massive latency and bandwidth costs of sending raw video over the public internet to AWS/GCP.
+
+### 3. Adaptive Computation Offloading
+*   **The Logic:** In `processor.py`, the system dynamically checks the 5G network latency. If latency spikes above 50ms, the engine downscales the YOLO inference resolution from `640x640` to `320x320`.
+*   **Why?** In degraded URLLC/eMBB 5G slice conditions, the network becomes the bottleneck. By reducing resolution, we drastically speed up the inference time, reducing thermal load on the edge node and compensating for the network delay, ensuring the pipeline doesn't freeze.
+
+### 4. Spatial Geometry & Multi-Queue Logic
+*   **The Logic:** Instead of tracking the whole frame, we use the `Shapely` library to define arbitrary polygonal "Queue Zones". We map the bottom-center of every tracked bounding box to see if it intersects with a specific polygon.
+*   **Why?** A single edge camera might point at 3 different checkout lanes. By checking geometric intersections, we can monitor the wait time, density, and crowd pressure of *each lane independently* without needing 3 separate cameras or AI models.
+
+### 5. Ring-Buffer Stream Management
+*   **The Logic:** The `VideoStream` class in `stream_manager.py` uses a `queue.Queue(maxsize=1)`. The camera producer writes frames as fast as possible; if the queue is full, it evicts the old frame and writes the new one.
+*   **Why?** In standard OpenCV, if the camera captures 60 frames per second but the AI processes 30, a buffer builds up. After 1 minute, the AI is analyzing the past! The ring-buffer ensures the AI *always* grabs the freshest, absolute-lowest-latency frame.
+
+### 6. Transport Layer: Binary WebSockets
+*   **The Logic:** Telemetry is serialized via Python's `struct.pack` into binary bytes and streamed via Socket.IO.
+*   **Why?** Standard REST APIs (HTTP GET/POST) have massive header overhead and require polling. WebSockets keep a persistent pipe open. Furthermore, sending binary bytes instead of JSON text cuts the payload size by over 70%, critical for saving 5G bandwidth.
+
+### 7. Client-Side Rendering: HTML5 Canvas + React
+*   **The Logic:** The Python backend does *not* draw bounding boxes on the video. It sends a clean low-quality video frame, and streams the bounding box coordinates as metadata. The React frontend uses an HTML5 `<canvas>` to draw the boxes locally.
+*   **Why?** Drawing boxes and text via OpenCV (`cv2.rectangle`) is CPU-intensive. By sending pure coordinate math, we offload the rendering effort to the user's local web browser (which naturally utilizes GPU acceleration), freeing up vital compute cycles on the 5G Edge Node.
 
 <br>
 
 <div align="center">
-  <img src="https://via.placeholder.com/1000x500/000000/00f0ff?text=++[+INSERT+CINEMATIC+PREVIEW+GIF+HERE+]" alt="Dashboard Preview" />
-  <p><em>The cinematic "Mission Control" Aether Edge telemetry interface.</em></p>
+  <p><em>The cinematic "Mission Control" telemetry interface built with React & Tailwind CSS.</em></p>
 </div>
 
 ---
 
-## ⚡ Key Features
+## ⚡ System Features & Subsystems
 
 > [!TIP]
 > **Why this matters:** This isn't just an AI script. It's a complete decoupled ecosystem engineered for production deployment on edge appliances.
 
-*   **Real-time AI Pipeline (No Freezing)**: The system naturally balances itself. One part of the code grabs the video as fast as possible, while another part processes the AI math. If your computer isn't fast enough, it safely drops old frames instead of crashing or freezing.
-*   **WebSockets + Binary Telemetry**: Traditional websites update every few seconds. We broadcast real-time metrics (`total_people`, `people_in_queue`, `density`, `estimated_wait`) constantly via Socket.IO, meaning your dashboard moves live.
-*   **Decentralized Drawing (Less Work for the AI)**: Instead of the AI working hard to draw boxes on the video before sending it, we send the "idea" of the boxes to your web browser. Your web browser (the dashboard) uses built-in graphic power (HTML5 Canvas) to draw the boxes, saving massive amounts of energy for the AI.
-*   **Advanced Wait-Time Math**: The system doesn't just guess; it calculates the exact flow tracking the density of people in the queue zone to dynamically predict how quickly the line will clear.
+*   **Real-time AI Pipeline**: Zero-backlog producer-consumer threading.
+*   **Dual Network Modes**: 
+    *   *Simulated Mode:* Injects configurable latency/drops to test edge-case failure modes without needing a live 5G environment.
+    *   *Real Camera Mode:* Uses a background ICMP probe thread to ping the IP camera, feeding *actual* network RTT (Round Trip Time) into the adaptive AI logic.
+*   **Multi-Queue Tracking**: Dynamically tracks `Lane 1`, `Lane 2`, etc., computing localized densities and dynamic Lambda service rates (Little's Law).
+*   **Camera Auto-Discovery**: Includes a `camera_finder.py` utility that automatically scans local subnets and tests RTSP/MJPEG protocols to effortlessly find live streams.
+*   **Headless Benchmarking**: Includes an `evaluate.py` script for empirical latency and payload-size metric gathering.
 
 <br/>
 
@@ -98,7 +126,7 @@ cd 5G_Usecase
 
 # Create a clean virtual environment and activate it
 python -m venv venv
-source venv/bin/activate  # On Windows use: .\venv\Scripts\activate
+.\venv\Scripts\activate
 
 # Install AI plugins (Torch, ONNX, Flask-SocketIO)
 pip install -r requirements.txt
@@ -109,11 +137,19 @@ Open `config.yaml` to configure your specific camera deployment point:
 
 ```yaml
 node_id: "EDGE-NYC-5G-01"
-roi_polygon:           # The coordinates defining the exactly drawn 'Queue' shape
-  - [200, 200]
-  - [800, 200]
-  ...
-video_source: 0        # Type '0' for a local webcam, or a camera web link "rtsp://..."
+use_real_camera: false     # Set to true to use RTSP/HTTP streams and live ICMP probes
+
+# Multi-Queue Zones Example
+queue_zones:
+  - id: lane_a
+    name: Queue A
+    polygon:
+      - [200, 200]
+      - [500, 200]
+      - [500, 600]
+      - [200, 600]
+    area_sqm: 5.0
+    queue_wait_threshold_sec: 5.0
 ```
 
 ### 4️⃣ React Frontend Setup

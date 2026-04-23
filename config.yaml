@@ -1,6 +1,7 @@
 node_id: "EDGE-NYC-5G-01"
 
-# The ROI (Region Of Interest) represents the "Queue Area" in physical space.
+# Legacy single-queue fallback.
+# If `queue_zones` is not provided, this ROI is treated as one queue area.
 # It is defined as a list of [x, y] coordinates forming a polygon on the 2D video feed.
 # For example, bounding a specific walkway or checkout lane.
 roi_polygon:
@@ -9,16 +10,73 @@ roi_polygon:
   - [800, 600]
   - [200, 600]
 
-# Time (in seconds) a tracked person must stay inside the ROI to be considered "waiting in queue"
+# Time (in seconds) a tracked person must stay inside a queue zone to be considered "waiting in queue"
 queue_wait_threshold_sec: 5.0
 
 # Maximum time (in seconds) a person can be "lost" by the YOLO tracker before their queue wait time is reset.
+# NOTE: For a real 5G camera with potential packet loss, consider raising this to 4.0-5.0 seconds.
 track_grace_period_sec: 2.0
 
-# Physical area of the ROI (in square meters) used to calculate crowd density.
+# Physical area of the fallback ROI (in square meters) used to calculate crowd density.
 roi_area_sqm: 10.0
 
-# To connect your actual 5G IP Camera, replace 0 with the RTSP network stream URL:
-# Example: video_source: "rtsp://admin:password@10.0.0.51:554/stream1"
-# For local fallback testing, you can keep it as 0
+# Optional multi-queue mode.
+# Define one polygon per queue lane to track them independently.
+# If this block is present, the backend uses these queue zones instead of `roi_polygon`.
+#
+# queue_zones:
+#   - id: lane_a
+#     name: Queue A
+#     polygon:
+#       - [200, 200]
+#       - [500, 200]
+#       - [500, 600]
+#       - [200, 600]
+#     area_sqm: 5.0
+#     queue_wait_threshold_sec: 5.0
+#     color: "#0f766e"
+#   - id: lane_b
+#     name: Queue B
+#     polygon:
+#       - [500, 200]
+#       - [800, 200]
+#       - [800, 600]
+#       - [500, 600]
+#     area_sqm: 5.0
+#     queue_wait_threshold_sec: 5.0
+#     color: "#b45309"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# VIDEO SOURCE CONFIGURATION
+# ─────────────────────────────────────────────────────────────────────────────
+# Set use_real_camera: true  →  system uses camera_url (RTSP/IP) and measures
+#                               REAL 5G network latency via ICMP probe.
+#                               All artificial simulate_delay() calls are SKIPPED.
+# Set use_real_camera: false →  system uses video_source (file/webcam index) and
+#                               simulates 5G conditions via NetworkSimulator profiles.
+use_real_camera: false
+
+# Local video source (used only when use_real_camera is false)
+# Replace 0 with a file path for offline testing: e.g. "videos/crowd.mp4"
 video_source: 0
+
+# 5G Camera RTSP URL (used only when use_real_camera is true)
+# Example: "rtsp://admin:password@10.0.0.51:554/stream1"
+# Leave empty if RTSP is not available — system will try camera_http_url next.
+camera_url: "rtsp://admin:admin123@192.168.128.10:554/avstream/channel=1/stream=1.sdp"
+
+# HTTP MJPEG fallback URL (used when camera_url is empty or RTSP fails)
+# This is the common case when a camera is connected via Ethernet directly
+# to the laptop and RTSP is unavailable or disabled.
+# Run `python camera_finder.py` to auto-discover this URL.
+# Example: "http://192.168.1.100/video"
+# Example: "http://192.168.1.100/mjpg/video.mjpg"
+camera_http_url: "http://192.168.128.10/video"
+
+# IP address of the 5G camera (or gateway) used to probe real network RTT.
+# Used to drive the adaptive YOLO resolution logic with real measured latency.
+# Leave empty ("") to disable probing (system will infer latency from frame gaps).
+real_latency_probe_host: "192.168.128.10"
+
+# Interval (in seconds) between ICMP latency probes to the camera host.
+latency_probe_interval_sec: 1.0

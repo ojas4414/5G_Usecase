@@ -18,7 +18,7 @@ def run_benchmark(max_frames=100, video_path=0):
         config = yaml.safe_load(f)
         
     processor = EdgeProcessor()
-    queue_predictor = StatisticalQueuePredictor()
+    queue_predictors = {}
     cap = cv2.VideoCapture(video_path)
     
     if not cap.isOpened():
@@ -40,18 +40,33 @@ def run_benchmark(max_frames=100, video_path=0):
         inference_time_ms = (time.time() - start_t) * 1000.0
         
         # 2. Metric Calculation
-        density = calculate_density(logic_data["total_people"], config.get("roi_area_sqm", 10.0))
-        wait_sec = queue_predictor.predict_wait(
-            logic_data["total_people"], 
-            logic_data["people_in_queue"], 
-            logic_data.get("lambda_rate", 0.0)
-        )
+        total_people_in_queue_zones = 0
+        total_people_queued = 0
+        total_queue_area_sqm = 0.0
+        max_queue_wait_sec = 0.0
+
+        for queue_zone in logic_data.get("queue_zones", []):
+            zone_id = queue_zone["id"]
+            predictor = queue_predictors.setdefault(zone_id, StatisticalQueuePredictor())
+            zone_wait_sec = predictor.predict_wait(
+                queue_zone["people_detected"],
+                queue_zone["people_in_queue"],
+                queue_zone.get("lambda_rate", 0.0)
+            )
+
+            total_people_in_queue_zones += queue_zone["people_detected"]
+            total_people_queued += queue_zone["people_in_queue"]
+            total_queue_area_sqm += queue_zone["area_sqm"]
+            max_queue_wait_sec = max(max_queue_wait_sec, zone_wait_sec)
+
+        density = calculate_density(total_people_in_queue_zones, total_queue_area_sqm)
+        wait_sec = max_queue_wait_sec
         
         # 3. Payload Serialization Simulation (Phase 3)
         # Struct binary format bytes
         binary_payload = struct.pack('!2i2f', 
             logic_data["total_people"], 
-            logic_data["people_in_queue"], 
+            total_people_queued, 
             density, 
             wait_sec
         )
@@ -60,7 +75,7 @@ def run_benchmark(max_frames=100, video_path=0):
         metrics_log.append({
             "Frame": frames_processed,
             "Total_People": logic_data["total_people"],
-            "Queued_People": logic_data["people_in_queue"],
+            "Queued_People": total_people_queued,
             "Density": density,
             "Est_Wait_Sec": wait_sec,
             "Inference_Latency_ms": round(inference_time_ms, 2),
