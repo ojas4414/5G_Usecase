@@ -1,31 +1,29 @@
 """
 camera_finder.py
-─────────────────────────────────────────────────────────────────────────────
-Standalone utility: scans your Ethernet interface for an IP camera and
-tests every common stream protocol automatically.
+----------------
+Reusable camera discovery helpers plus a CLI utility.
 
 Run with:
     python camera_finder.py
-    python camera_finder.py --subnet 169.254.0.0/16   # link-local fallback
-    python camera_finder.py --ip 192.168.1.50          # skip scan, test one IP
+    python camera_finder.py --subnet 10.101.0.0/24
+    python camera_finder.py --ip 10.101.0.17
 
-It will print the exact camera_url / camera_http_url value to paste into
-config.yaml.
-─────────────────────────────────────────────────────────────────────────────
+The helpers are also used by app startup so real-camera mode can auto-discover
+the current camera IP when a previously saved address is stale.
 """
 
-import socket
-import subprocess
-import platform
-import sys
-import time
+from __future__ import annotations
+
 import argparse
 import ipaddress
+import socket
+import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Iterable
+from urllib.parse import urlsplit, urlunsplit
 
 import cv2
 
-# ── Common camera stream paths to probe ──────────────────────────────────────
 RTSP_PATHS = [
     "rtsp://{ip}:554/stream1",
     "rtsp://{ip}:554/live",
@@ -54,36 +52,67 @@ HTTP_JPEG_PATHS = [
     "http://{ip}/cgi-bin/camera",
 ]
 
-# Ports that indicate a camera is likely present
 SCAN_PORTS = [80, 554, 8080, 8554, 8000, 443]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Network helpers
-# ─────────────────────────────────────────────────────────────────────────────
+def _dedupe(values: Iterable[str]) -> list[str]:
+    seen = set()
+    ordered = []
+    for value in values:
+        normalized = value.strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        ordered.append(normalized)
+    return ordered
 
-def get_local_subnets() -> list[str]:
-    """Returns subnets inferred from all non-loopback IPv4 interfaces."""
-    subnets = []
+
+def _log(message: str, verbose: bool) -> None:
+    if verbose:
+        print(message)
+
+
+def get_local_subnets(max_hosts_per_subnet: int | None = 512) -> list[str]:
+    """
+    Returns local IPv4 subnets for all non-loopback interfaces.
+
+    Large networks are reduced to the interface's /24 segment so auto-discovery
+    stays fast enough to use at app startup.
+    """
+    subnets: list[str] = []
+
     try:
         import psutil
-        for iface, addrs in psutil.net_if_addrs().items():
+
+        for addrs in psutil.net_if_addrs().values():
             for addr in addrs:
-                if addr.family == socket.AF_INET and not addr.address.startswith("127."):
-                    try:
-                        net = ipaddress.IPv4Network(
-                            f"{addr.address}/{addr.netmask}", strict=False
-                        )
-                        subnets.append(str(net))
-                    except Exception:
-                        pass
+                if addr.family != socket.AF_INET or addr.address.startswith("127."):
+                    continue
+                try:
+                    network = ipaddress.IPv4Network(
+                        f"{addr.address}/{addr.netmask}",
+                        strict=False,
+                    )
+                except Exception:
+                    continue
+
+                if max_hosts_per_subnet and network.num_addresses > max_hosts_per_subnet:
+                    network = ipaddress.IPv4Network(f"{addr.address}/24", strict=False)
+                subnets.append(str(network))
     except ImportError:
-        # Fallback: hostname-based guess
-        hostname = socket.gethostname()
-        local_ip = socket.gethostbyname(hostname)
-        base = ".".join(local_ip.split(".")[:3])
-        subnets.append(f"{base}.0/24")
-    return subnets
+        for family, _, _, _, sockaddr in socket.getaddrinfo(
+            socket.gethostname(),
+            None,
+            socket.AF_INET,
+        ):
+            if family != socket.AF_INET:
+                continue
+            ip = sockaddr[0]
+            if ip.startswith("127."):
+                continue
+            subnets.append(str(ipaddress.IPv4Network(f"{ip}/24", strict=False)))
+
+    return _dedupe(subnets)
 
 
 def is_port_open(ip: str, port: int, timeout: float = 0.5) -> bool:
@@ -95,37 +124,101 @@ def is_port_open(ip: str, port: int, timeout: float = 0.5) -> bool:
         return False
 
 
-def scan_subnet(subnet: str, max_workers: int = 128) -> list[str]:
+def scan_subnet(
+    subnet: str,
+    max_workers: int = 128,
+    verbose: bool = True,
+) -> list[str]:
     """Scans a subnet for hosts with any camera-relevant port open."""
-    print(f"\n[Scan] Probing subnet {subnet} (this takes ~10s)...")
-    net = ipaddress.IPv4Network(subnet, strict=False)
-    hosts = list(net.hosts())
+    _log(f"\n[Scan] Probing subnet {subnet}...", verbose)
+    network = ipaddress.IPv4Network(subnet, strict=False)
 
-    found = []
+    found: list[str] = []
 
-    def check_host(ip_obj):
+    def check_host(ip_obj: ipaddress.IPv4Address) -> str | None:
         ip = str(ip_obj)
         for port in SCAN_PORTS:
             if is_port_open(ip, port, timeout=0.4):
                 return ip
         return None
 
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futures = {ex.submit(check_host, ip): ip for ip in hosts}
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(check_host, ip): ip
+            for ip in network.hosts()
+        }
         for future in as_completed(futures):
             result = future.result()
-            if result:
-                found.append(result)
-                print(f"  ✓ Found device: {result}")
+            if not result or result in found:
+                continue
+            found.append(result)
+            _log(f"  + Found device: {result}", verbose)
 
     return found
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Stream probe helpers
-# ─────────────────────────────────────────────────────────────────────────────
+def swap_ip_in_url(url: str, ip: str) -> str | None:
+    """Rebuilds a URL with a new host while preserving credentials/path."""
+    parsed = urlsplit(url)
+    if not parsed.scheme or not parsed.hostname:
+        return None
 
-def _try_opencv_url(url: str, timeout_s: float = 3.0, label: str = "") -> bool:
+    auth = ""
+    if parsed.username:
+        auth = parsed.username
+        if parsed.password is not None:
+            auth += f":{parsed.password}"
+        auth += "@"
+
+    port = f":{parsed.port}" if parsed.port else ""
+    netloc = f"{auth}{ip}{port}"
+    return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
+
+
+def build_preferred_urls(
+    camera_url: str = "",
+    camera_http_url: str = "",
+) -> dict[str, list[str]]:
+    preferred = {"rtsp": [], "mjpeg": [], "jpeg": []}
+
+    if camera_url:
+        preferred["rtsp"].append(camera_url)
+
+    if camera_http_url:
+        path = urlsplit(camera_http_url).path.lower()
+        if path.endswith((".jpg", ".jpeg")):
+            preferred["jpeg"].append(camera_http_url)
+        else:
+            preferred["mjpeg"].append(camera_http_url)
+
+    return preferred
+
+
+def _build_probe_plan(
+    ip: str,
+    preferred_urls: dict[str, list[str]] | None = None,
+) -> dict[str, list[str]]:
+    plan = {"rtsp": [], "mjpeg": [], "jpeg": []}
+
+    for kind in plan:
+        raw_urls = (preferred_urls or {}).get(kind, [])
+        plan[kind].extend(
+            swapped
+            for raw_url in raw_urls
+            if (swapped := swap_ip_in_url(raw_url, ip))
+        )
+
+    plan["rtsp"].extend(tmpl.format(ip=ip) for tmpl in RTSP_PATHS)
+    plan["mjpeg"].extend(tmpl.format(ip=ip) for tmpl in MJPEG_PATHS)
+    plan["jpeg"].extend(tmpl.format(ip=ip) for tmpl in HTTP_JPEG_PATHS)
+
+    for kind, urls in plan.items():
+        plan[kind] = _dedupe(urls)
+
+    return plan
+
+
+def _try_opencv_url(url: str, timeout_s: float = 3.0) -> bool:
     """
     Tries to open url with OpenCV and read one frame.
     Returns True if a valid frame was received within timeout_s.
@@ -134,7 +227,7 @@ def _try_opencv_url(url: str, timeout_s: float = 3.0, label: str = "") -> bool:
 
     result = [False]
 
-    def attempt():
+    def attempt() -> None:
         cap = cv2.VideoCapture(url)
         if cap.isOpened():
             ret, frame = cap.read()
@@ -142,150 +235,207 @@ def _try_opencv_url(url: str, timeout_s: float = 3.0, label: str = "") -> bool:
                 result[0] = True
         cap.release()
 
-    t = threading.Thread(target=attempt, daemon=True)
-    t.start()
-    t.join(timeout=timeout_s)
+    thread = threading.Thread(target=attempt, daemon=True)
+    thread.start()
+    thread.join(timeout=timeout_s)
     return result[0]
 
 
-def probe_camera(ip: str) -> dict:
+def probe_camera(
+    ip: str,
+    preferred_urls: dict[str, list[str]] | None = None,
+    verbose: bool = True,
+) -> dict[str, list[str]]:
     """
-    Tests all known stream protocols/paths for a given IP.
-    Returns a dict with keys 'rtsp', 'mjpeg', 'jpeg' listing working URLs.
+    Tests common stream protocols/paths for a given IP.
+    Returns a dict with keys 'rtsp', 'mjpeg', and 'jpeg'.
     """
-    print(f"\n[Probe] Testing {ip}...")
+    _log(f"\n[Probe] Testing {ip}...", verbose)
     results = {"rtsp": [], "mjpeg": [], "jpeg": []}
+    plan = _build_probe_plan(ip, preferred_urls=preferred_urls)
 
-    # RTSP
-    for tmpl in RTSP_PATHS:
-        url = tmpl.format(ip=ip)
-        sys.stdout.write(f"  RTSP  {url} ... ")
-        sys.stdout.flush()
-        ok = _try_opencv_url(url, timeout_s=4.0)
-        print("✓ WORKS" if ok else "✗")
-        if ok:
-            results["rtsp"].append(url)
-
-    # HTTP MJPEG
-    for tmpl in MJPEG_PATHS:
-        url = tmpl.format(ip=ip)
-        sys.stdout.write(f"  MJPEG {url} ... ")
-        sys.stdout.flush()
-        ok = _try_opencv_url(url, timeout_s=4.0)
-        print("✓ WORKS" if ok else "✗")
-        if ok:
-            results["mjpeg"].append(url)
-
-    # HTTP JPEG (snapshot polling)
-    for tmpl in HTTP_JPEG_PATHS:
-        url = tmpl.format(ip=ip)
-        sys.stdout.write(f"  JPEG  {url} ... ")
-        sys.stdout.flush()
-        ok = _try_opencv_url(url, timeout_s=3.0)
-        print("✓ WORKS" if ok else "✗")
-        if ok:
-            results["jpeg"].append(url)
+    for label, key, timeout_s in (
+        ("RTSP", "rtsp", 4.0),
+        ("MJPEG", "mjpeg", 4.0),
+        ("JPEG", "jpeg", 3.0),
+    ):
+        for url in plan[key]:
+            if verbose:
+                sys.stdout.write(f"  {label:<5} {url} ... ")
+                sys.stdout.flush()
+            ok = _try_opencv_url(url, timeout_s=timeout_s)
+            if verbose:
+                print("WORKS" if ok else "x")
+            if ok:
+                results[key].append(url)
 
     return results
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Report
-# ─────────────────────────────────────────────────────────────────────────────
+def pick_best_stream(probe_results: dict[str, list[str]]) -> tuple[str | None, str | None]:
+    for key in ("rtsp", "mjpeg", "jpeg"):
+        urls = probe_results.get(key, [])
+        if urls:
+            return key, urls[0]
+    return None, None
 
-def print_report(ip: str, probe_results: dict):
-    any_found = any(probe_results.values())
-    print("\n" + "═" * 60)
-    if not any_found:
-        print(f"  ✗  No working stream found on {ip}")
+
+def discover_camera(
+    candidate_ips: Iterable[str] | None = None,
+    subnets: Iterable[str] | None = None,
+    preferred_urls: dict[str, list[str]] | None = None,
+    include_local_subnets: bool = True,
+    max_hosts_per_subnet: int = 512,
+    max_workers: int = 128,
+    verbose: bool = True,
+) -> dict[str, object] | None:
+    """
+    Finds the first reachable camera stream.
+
+    Returns:
+        {
+            "ip": "10.101.0.17",
+            "kind": "rtsp",
+            "url": "rtsp://user:pass@10.101.0.17/...",
+            "results": {...}
+        }
+    """
+    candidate_ip_list = _dedupe(candidate_ips or [])
+    subnet_list = _dedupe(subnets or [])
+
+    if include_local_subnets:
+        subnet_list = _dedupe(
+            list(subnet_list) + get_local_subnets(max_hosts_per_subnet=max_hosts_per_subnet)
+        )
+
+    for subnet in subnet_list:
+        try:
+            network = ipaddress.IPv4Network(subnet, strict=False)
+        except ValueError:
+            _log(f"[Skip] Invalid subnet '{subnet}'", verbose)
+            continue
+
+        if network.num_addresses > max_hosts_per_subnet:
+            _log(
+                f"[Skip] {subnet} has {network.num_addresses} addresses; "
+                f"raise max_hosts_per_subnet to scan it fully.",
+                verbose,
+            )
+            continue
+
+        candidate_ip_list.extend(
+            scan_subnet(subnet, max_workers=max_workers, verbose=verbose)
+        )
+        candidate_ip_list = _dedupe(candidate_ip_list)
+
+    if not candidate_ip_list:
+        _log("[Info] No candidate camera IPs found.", verbose)
+        return None
+
+    _log(
+        f"\n[Info] Probing {len(candidate_ip_list)} candidate device(s)...",
+        verbose,
+    )
+    for ip in candidate_ip_list:
+        results = probe_camera(ip, preferred_urls=preferred_urls, verbose=verbose)
+        kind, url = pick_best_stream(results)
+        if url:
+            return {
+                "ip": ip,
+                "kind": kind,
+                "url": url,
+                "results": results,
+            }
+
+    return None
+
+
+def print_report(ip: str, probe_results: dict[str, list[str]]) -> None:
+    best_key, best_url = pick_best_stream(probe_results)
+    print("\n" + "=" * 60)
+
+    if not best_url:
+        print(f"  x No working stream found on {ip}")
         print("  Try:")
-        print("    • Opening http://<camera-ip> in a browser to find the stream path")
-        print("    • Checking the camera's manual for its default stream URL")
-        print("    • Trying with credentials: rtsp://admin:admin@<ip>:554/stream1")
-        print("═" * 60)
+        print("    - Open http://<camera-ip> in a browser to inspect the web UI")
+        print("    - Check the camera manual for the default stream URL")
+        print("    - Keep credentials in camera_url so startup can reuse them")
+        print("=" * 60)
         return
 
-    print(f"  ✓  Working streams found on {ip}")
-    print("═" * 60)
-
-    # Priority: RTSP > MJPEG > JPEG
-    best_url = None
-    best_key = None
-    for key in ("rtsp", "mjpeg", "jpeg"):
-        if probe_results[key]:
-            best_url = probe_results[key][0]
-            best_key = key
-            break
-
-    print("\n▶  Paste into config.yaml:\n")
+    print(f"  + Working streams found on {ip}")
+    print("=" * 60)
+    print("\n> Paste into config.yaml:\n")
     print("  use_real_camera: true")
-    if best_key in ("rtsp",):
+    if best_key == "rtsp":
         print(f'  camera_url: "{best_url}"')
     else:
-        print(f'  camera_url: ""                  # RTSP not working')
-        print(f'  camera_http_url: "{best_url}"   # ← use this instead')
+        print('  camera_url: ""')
+        print(f'  camera_http_url: "{best_url}"')
     print(f'  real_latency_probe_host: "{ip}"')
 
-    print("\n▶  All working URLs:\n")
+    print("\n> All working URLs:\n")
     for key, urls in probe_results.items():
-        for u in urls:
-            print(f"  [{key.upper():5}] {u}")
-    print("═" * 60)
+        for url in urls:
+            print(f"  [{key.upper():5}] {url}")
+    print("=" * 60)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Main
-# ─────────────────────────────────────────────────────────────────────────────
-
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Auto-discover an IP camera connected via Ethernet."
+        description="Auto-discover an IP camera on the current network."
     )
-    parser.add_argument("--ip",     help="Skip scan, test this specific IP directly")
-    parser.add_argument("--subnet", help="Override subnet to scan (CIDR, e.g. 192.168.1.0/24)")
+    parser.add_argument("--ip", help="Skip scan and probe this IP directly")
+    parser.add_argument(
+        "--subnet",
+        help="Subnet to scan (CIDR form, for example 10.101.0.0/24)",
+    )
     args = parser.parse_args()
 
-    print("\n╔══════════════════════════════════════════════════╗")
-    print("║   5G Edge Analytics — Camera Finder Utility     ║")
-    print("╚══════════════════════════════════════════════════╝\n")
+    print("\n============================================================")
+    print("   5G Edge Analytics - Camera Finder Utility")
+    print("============================================================")
 
-    # ── Mode 1: user provided a specific IP ───────────────────────────────
     if args.ip:
-        results = probe_camera(args.ip)
+        results = probe_camera(args.ip, verbose=True)
         print_report(args.ip, results)
         return
 
-    # ── Mode 2: scan subnet ───────────────────────────────────────────────
     if args.subnet:
         subnets = [args.subnet]
     else:
-        subnets = get_local_subnets()
-        # Also add link-local range for cameras with auto-IP (169.254.x.x)
-        if not any("169.254" in s for s in subnets):
-            subnets.append("169.254.0.0/16")
+        subnets = get_local_subnets(max_hosts_per_subnet=512)
 
     print(f"[Info] Scanning subnets: {', '.join(subnets)}")
 
-    all_candidates = []
+    candidates: list[str] = []
     for subnet in subnets:
-        # Skip huge subnets to avoid a 10-minute scan
-        net = ipaddress.IPv4Network(subnet, strict=False)
-        if net.num_addresses > 512:
-            print(f"[Skip] {subnet} is too large (>{net.num_addresses} hosts). "
-                  f"Use --ip <camera-ip> to test directly.")
+        try:
+            network = ipaddress.IPv4Network(subnet, strict=False)
+        except ValueError:
+            print(f"[Skip] Invalid subnet '{subnet}'")
             continue
-        all_candidates += scan_subnet(subnet)
 
-    if not all_candidates:
-        print("\n[!] No devices found with camera-relevant ports open.")
-        print("    • Make sure the camera is powered and the Ethernet cable is plugged in.")
-        print("    • Check Windows IP settings: both laptop and camera must be on the same subnet.")
-        print("    • Try: python camera_finder.py --ip <camera-ip>")
+        if network.num_addresses > 512:
+            print(
+                f"[Skip] {subnet} has {network.num_addresses} addresses. "
+                "Use --subnet or --ip to narrow the scan."
+            )
+            continue
+
+        candidates.extend(scan_subnet(subnet, verbose=True))
+        candidates = _dedupe(candidates)
+
+    if not candidates:
+        print("\n[!] No candidate devices found with camera-relevant ports open.")
+        print("    - Make sure the camera is powered and on the same reachable network")
+        print("    - Try: python camera_finder.py --subnet 10.101.0.0/24")
+        print("    - Try: python camera_finder.py --ip <camera-ip>")
         return
 
-    print(f"\n[Info] Found {len(all_candidates)} candidate device(s). Probing streams...\n")
-    for ip in all_candidates:
-        results = probe_camera(ip)
+    print(f"\n[Info] Found {len(candidates)} candidate device(s).")
+    for ip in candidates:
+        results = probe_camera(ip, verbose=True)
         print_report(ip, results)
 
 
