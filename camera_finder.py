@@ -25,11 +25,17 @@ from urllib.parse import urlsplit, urlunsplit
 
 import cv2
 
+COMMON_RTSP_PATHS = [
+    "/stream1",
+    "/live",
+    "/h264",
+    "/cam/realmonitor?channel=1&subtype=0",
+    "/Streaming/Channels/101",
+    "/Streaming/Channels/102",
+]
+
 RTSP_PATHS = [
-    "rtsp://{ip}:554/stream1",
-    "rtsp://{ip}:554/live",
-    "rtsp://{ip}:554/h264",
-    "rtsp://{ip}:554/cam/realmonitor?channel=1&subtype=0",
+    *(f"rtsp://{{ip}}:554{path}" for path in COMMON_RTSP_PATHS),
     "rtsp://{ip}:8554/stream1",
     "rtsp://{ip}:8554/live",
     "rtsp://{ip}/stream1",
@@ -203,6 +209,31 @@ def swap_ip_in_url(url: str, ip: str) -> str | None:
     return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
 
 
+def build_rtsp_reference_candidates(ip: str, camera_url: str) -> list[str]:
+    """
+    Builds common RTSP endpoint guesses using the configured auth and port.
+
+    This helps discovery when the saved camera IP is stale but the credentials
+    are still required by the camera for standard vendor paths.
+    """
+    parsed = urlsplit(camera_url)
+    if parsed.scheme.lower() != "rtsp":
+        return []
+
+    auth = ""
+    if parsed.username:
+        auth = parsed.username
+        if parsed.password is not None:
+            auth += f":{parsed.password}"
+        auth += "@"
+
+    port = parsed.port or 554
+    return [
+        f"rtsp://{auth}{ip}:{port}{path}"
+        for path in COMMON_RTSP_PATHS
+    ]
+
+
 def build_preferred_urls(
     camera_url: str = "",
     camera_http_url: str = "",
@@ -235,6 +266,9 @@ def _build_probe_plan(
             for raw_url in raw_urls
             if (swapped := swap_ip_in_url(raw_url, ip))
         )
+
+    for raw_url in (preferred_urls or {}).get("rtsp", []):
+        plan["rtsp"].extend(build_rtsp_reference_candidates(ip, raw_url))
 
     plan["rtsp"].extend(tmpl.format(ip=ip) for tmpl in RTSP_PATHS)
     plan["mjpeg"].extend(tmpl.format(ip=ip) for tmpl in MJPEG_PATHS)
