@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import ipaddress
+import os
 import socket
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -96,6 +97,9 @@ def get_local_subnets(max_hosts_per_subnet: int | None = 512) -> list[str]:
                 except Exception:
                     continue
 
+                if network.num_addresses <= 1:
+                    continue
+
                 if max_hosts_per_subnet and network.num_addresses > max_hosts_per_subnet:
                     network = ipaddress.IPv4Network(f"{addr.address}/24", strict=False)
                 subnets.append(str(network))
@@ -113,6 +117,30 @@ def get_local_subnets(max_hosts_per_subnet: int | None = 512) -> list[str]:
             subnets.append(str(ipaddress.IPv4Network(f"{ip}/24", strict=False)))
 
     return _dedupe(subnets)
+
+
+def normalize_rtsp_transport_order(
+    transport_order: Iterable[str] | None = None,
+) -> list[str]:
+    allowed = {"tcp", "udp"}
+    normalized = []
+    for transport in transport_order or ("tcp", "udp"):
+        value = str(transport).strip().lower()
+        if value in allowed and value not in normalized:
+            normalized.append(value)
+    if not normalized:
+        normalized = ["tcp", "udp"]
+    return normalized
+
+
+def _ffmpeg_options_for_transport(transport: str) -> str:
+    return (
+        f"rtsp_transport;{transport}|"
+        "fflags;nobuffer|"
+        "flags;low_delay|"
+        "analyzeduration;0|"
+        "probesize;32"
+    )
 
 
 def is_port_open(ip: str, port: int, timeout: float = 0.5) -> bool:
@@ -218,32 +246,59 @@ def _build_probe_plan(
     return plan
 
 
-def _try_opencv_url(url: str, timeout_s: float = 3.0) -> bool:
+def _try_opencv_url(
+    url: str,
+    timeout_s: float = 3.0,
+    rtsp_transport_order: Iterable[str] | None = None,
+) -> bool:
     """
     Tries to open url with OpenCV and read one frame.
     Returns True if a valid frame was received within timeout_s.
     """
     import threading
 
-    result = [False]
+    transport_attempts = [None]
+    if url.startswith("rtsp://"):
+        transport_attempts = normalize_rtsp_transport_order(rtsp_transport_order)
 
-    def attempt() -> None:
-        cap = cv2.VideoCapture(url)
-        if cap.isOpened():
-            ret, frame = cap.read()
-            if ret and frame is not None and frame.size > 0:
-                result[0] = True
-        cap.release()
+    for transport in transport_attempts:
+        result = [False]
+        previous_options = os.environ.get("OPENCV_FFMPEG_CAPTURE_OPTIONS")
 
-    thread = threading.Thread(target=attempt, daemon=True)
-    thread.start()
-    thread.join(timeout=timeout_s)
-    return result[0]
+        def attempt() -> None:
+            if transport:
+                os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = _ffmpeg_options_for_transport(
+                    transport
+                )
+                cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
+            else:
+                cap = cv2.VideoCapture(url)
+
+            if cap.isOpened():
+                ret, frame = cap.read()
+                if ret and frame is not None and frame.size > 0:
+                    result[0] = True
+            cap.release()
+
+        thread = threading.Thread(target=attempt, daemon=True)
+        thread.start()
+        thread.join(timeout=timeout_s)
+
+        if previous_options is None:
+            os.environ.pop("OPENCV_FFMPEG_CAPTURE_OPTIONS", None)
+        else:
+            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = previous_options
+
+        if result[0]:
+            return True
+
+    return False
 
 
 def probe_camera(
     ip: str,
     preferred_urls: dict[str, list[str]] | None = None,
+    rtsp_transport_order: Iterable[str] | None = None,
     verbose: bool = True,
 ) -> dict[str, list[str]]:
     """
@@ -263,7 +318,11 @@ def probe_camera(
             if verbose:
                 sys.stdout.write(f"  {label:<5} {url} ... ")
                 sys.stdout.flush()
-            ok = _try_opencv_url(url, timeout_s=timeout_s)
+            ok = _try_opencv_url(
+                url,
+                timeout_s=timeout_s,
+                rtsp_transport_order=rtsp_transport_order,
+            )
             if verbose:
                 print("WORKS" if ok else "x")
             if ok:
@@ -284,6 +343,7 @@ def discover_camera(
     candidate_ips: Iterable[str] | None = None,
     subnets: Iterable[str] | None = None,
     preferred_urls: dict[str, list[str]] | None = None,
+    rtsp_transport_order: Iterable[str] | None = None,
     include_local_subnets: bool = True,
     max_hosts_per_subnet: int = 512,
     max_workers: int = 128,
@@ -337,7 +397,12 @@ def discover_camera(
         verbose,
     )
     for ip in candidate_ip_list:
-        results = probe_camera(ip, preferred_urls=preferred_urls, verbose=verbose)
+        results = probe_camera(
+            ip,
+            preferred_urls=preferred_urls,
+            rtsp_transport_order=rtsp_transport_order,
+            verbose=verbose,
+        )
         kind, url = pick_best_stream(results)
         if url:
             return {
@@ -397,7 +462,7 @@ def main() -> None:
     print("============================================================")
 
     if args.ip:
-        results = probe_camera(args.ip, verbose=True)
+        results = probe_camera(args.ip, rtsp_transport_order=("tcp", "udp"), verbose=True)
         print_report(args.ip, results)
         return
 
@@ -435,7 +500,7 @@ def main() -> None:
 
     print(f"\n[Info] Found {len(candidates)} candidate device(s).")
     for ip in candidates:
-        results = probe_camera(ip, verbose=True)
+        results = probe_camera(ip, rtsp_transport_order=("tcp", "udp"), verbose=True)
         print_report(ip, results)
 
 

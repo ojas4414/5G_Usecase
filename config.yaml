@@ -60,6 +60,10 @@ camera_url: "rtsp://admin:admin123@192.168.128.10:554/avstream/channel=1/stream=
 # Saved HTTP MJPEG fallback URL.
 camera_http_url: "http://192.168.128.10/video"
 
+# Preferred RTSP transport for the live runtime stream.
+# TCP is the safest default for SIM/5G/NAT setups.
+camera_rtsp_transport: "tcp"
+
 # IP address used for real RTT probing.
 # When auto-discovery is enabled, startup can overwrite this so probing follows
 # the active camera automatically.
@@ -79,6 +83,9 @@ camera_auto_discovery:
   max_hosts_per_subnet: 512
   max_workers: 128
   verbose: true
+  rtsp_transport_order:
+    - "tcp"
+    - "udp"
   # Add known lab/private 5G ranges here if the VM is not on the same local
   # subnet as the camera or if you want to force a specific scan target.
   subnets:

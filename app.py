@@ -31,6 +31,7 @@ if USE_REAL_CAMERA:
     camera_url = config.get("camera_url", "")
     camera_http_url = config.get("camera_http_url", "")
     auto_discovery = config.get("camera_auto_discovery", {})
+    camera_rtsp_transport = config.get("camera_rtsp_transport", "tcp")
 
     VIDEO_SOURCE, resolved_camera_host = resolve_camera_source(
         camera_url,
@@ -108,7 +109,10 @@ def ingest_producer():
     2. A compressed browser preview over WebSocket
     """
     global current_raw_frame
-    stream = VideoStream(src=VIDEO_SOURCE).start()
+    stream = VideoStream(
+        src=VIDEO_SOURCE,
+        rtsp_transport=config.get("camera_rtsp_transport", "tcp"),
+    ).start()
 
     while True:
         raw_frame = stream.read()
