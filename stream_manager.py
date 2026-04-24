@@ -247,6 +247,7 @@ class VideoStream:
         """
         reconnect_delay = 2.0
         max_reconnect_delay = 30.0
+        consecutive_read_failures = 0
 
         while not self.stopped:
             if not self.cap.isOpened():
@@ -263,9 +264,15 @@ class VideoStream:
                 logger.error(
                     "[VideoStream] cap.read() failed - possible packet loss or link drop."
                 )
+                consecutive_read_failures += 1
+                if consecutive_read_failures >= 30:
+                    logger.warning("[VideoStream] Too many consecutive read failures, forcing reconnect.")
+                    self.cap.release()  # Forces cap.isOpened() to False in next loop
+                    consecutive_read_failures = 0
                 time.sleep(0.05)
                 continue
 
+            consecutive_read_failures = 0
             reconnect_delay = 2.0
 
             if self.frame_queue.full():
@@ -288,6 +295,12 @@ class VideoStream:
             if self.src.startswith("rtsp://"):
                 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = _ffmpeg_options_for_transport(
                     self.rtsp_transport
+                )
+            else:
+                os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
+                    "fflags;nobuffer|"
+                    "flags;low_delay|"
+                    "analyzeduration;0"
                 )
             self.cap = cv2.VideoCapture(self.src, cv2.CAP_FFMPEG)
             self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)

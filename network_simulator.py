@@ -155,7 +155,7 @@ class NetworkSimulator:
             else:
                 self._failed_pings = min(self._failed_pings + 1, self._FAIL_WINDOW)
                 # Elevate latency significantly on probe failure (link likely degraded)
-                self.current_latency_ms = min(self.current_latency_ms * 1.5, 2000.0)
+                self.current_latency_ms = max(500.0, min(self.current_latency_ms * 1.5, 2000.0))
 
             # Infer packet-loss probability from failed-ping ratio
             self.current_drop_prob = self._failed_pings / self._FAIL_WINDOW

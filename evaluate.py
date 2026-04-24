@@ -89,6 +89,10 @@ def run_benchmark(max_frames=100, video_path=0):
     cap.release()
     
     # Export for paper plotting
+    if not metrics_log:
+        print("\n[!] No frames processed, no benchmark results to save.")
+        return
+
     df = pd.DataFrame(metrics_log)
     output_filename = "benchmark_results.csv"
     df.to_csv(output_filename, index=False)
