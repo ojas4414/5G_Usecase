@@ -24,9 +24,7 @@ def _ffmpeg_options_for_transport(transport: str) -> str:
     return (
         f"rtsp_transport;{transport}|"
         "fflags;nobuffer|"
-        "flags;low_delay|"
-        "analyzeduration;0|"
-        "probesize;32"
+        "flags;low_delay"
     )
 
 
@@ -192,8 +190,7 @@ class VideoStream:
         elif isinstance(self.src, str) and self.src.startswith("http://"):
             os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
                 "fflags;nobuffer|"
-                "flags;low_delay|"
-                "analyzeduration;0"
+                "flags;low_delay"
             )
             self.cap = cv2.VideoCapture(self.src, cv2.CAP_FFMPEG)
             self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
@@ -299,8 +296,7 @@ class VideoStream:
             else:
                 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
                     "fflags;nobuffer|"
-                    "flags;low_delay|"
-                    "analyzeduration;0"
+                    "flags;low_delay"
                 )
             self.cap = cv2.VideoCapture(self.src, cv2.CAP_FFMPEG)
             self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)

@@ -76,7 +76,7 @@ latency_probe_interval_sec: 1.0
 # Used when saved camera URLs are empty or no longer reachable from the current
 # machine or VM.
 camera_auto_discovery:
-  enabled: true
+  enabled: false
   sync_probe_host: true
   include_local_subnets: true
   prefer_scanned_camera: false

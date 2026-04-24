@@ -143,9 +143,7 @@ def _ffmpeg_options_for_transport(transport: str) -> str:
     return (
         f"rtsp_transport;{transport}|"
         "fflags;nobuffer|"
-        "flags;low_delay|"
-        "analyzeduration;0|"
-        "probesize;32"
+        "flags;low_delay"
     )
 
 

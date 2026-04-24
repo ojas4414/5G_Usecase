@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import base64
 import logging
 import struct
@@ -25,6 +26,10 @@ logger = logging.getLogger(__name__)
 with open("config.yaml", "r", encoding="utf-8") as file:
     config = yaml.safe_load(file)
 
+parser = argparse.ArgumentParser(description="Run 5G Edge Analytics App", add_help=False)
+parser.add_argument("--camera-ip", type=str, help="IP address of the real camera (overrides config and disables auto-scan)")
+args, _ = parser.parse_known_args()
+
 USE_REAL_CAMERA: bool = config.get("use_real_camera", False)
 
 if USE_REAL_CAMERA:
@@ -32,6 +37,15 @@ if USE_REAL_CAMERA:
     camera_http_url = config.get("camera_http_url", "")
     auto_discovery = config.get("camera_auto_discovery", {})
     camera_rtsp_transport = config.get("camera_rtsp_transport", "tcp")
+
+    if args.camera_ip:
+        from camera_finder import swap_ip_in_url
+        if camera_url:
+            camera_url = swap_ip_in_url(camera_url, args.camera_ip) or camera_url
+        if camera_http_url:
+            camera_http_url = swap_ip_in_url(camera_http_url, args.camera_ip) or camera_http_url
+        auto_discovery["enabled"] = False
+        config["real_latency_probe_host"] = args.camera_ip
 
     VIDEO_SOURCE, resolved_camera_host = resolve_camera_source(
         camera_url,
